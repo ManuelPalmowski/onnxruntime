@@ -220,7 +220,10 @@ class SymbolicShapeInference:
             "PagedAttention": self._infer_PagedAttention,
             "PythonOp": self._infer_PythonOp,
             "QLinearAdd": self._infer_QLinearBinary,
+            "QLinearConcat": self._infer_QLinearConcat,
+            "QLinearGlobalAveragePool": self._infer_QLinearGlobalAveragePool,
             "QLinearMul": self._infer_QLinearBinary,
+            "QLinearSoftmax": self._infer_QLinearSoftmax,
             "QuantizeLinear": self._infer_QuantizeLinear,
             "QuickGelu": self._infer_FastGelu,
             "RelativePositionBias": self._infer_RelativePositionBias,
@@ -493,7 +496,10 @@ class SymbolicShapeInference:
             "SparseAttention",
             "SkipGroupNorm",
             "QLinearAdd",
+            "QLinearConcat",
+            "QLinearGlobalAveragePool",
             "QLinearMul",
+            "QLinearSoftmax",
         ]
 
         if not skip_infer:
@@ -542,7 +548,7 @@ class SymbolicShapeInference:
             )
 
             self.tmp_mp_.graph.CopyFrom(tmp_graph)
-
+            logger.debug("single node infer")
             self.tmp_mp_ = shape_inference.infer_shapes(self.tmp_mp_)
 
         for i_o in range(len(node.output)):
@@ -949,6 +955,56 @@ class SymbolicShapeInference:
             )
         )
 
+    def _infer_QLinearConcat(self, node):  # noqa: N802
+        tensor_input_indices = list(range(2, len(node.input), 3))
+        if not tensor_input_indices:
+            return
+
+        if any(
+            node.input[i] in self.sympy_data_ or node.input[i] in self.initializers_ for i in tensor_input_indices
+        ):
+            values = [self._try_get_value(node, i) for i in tensor_input_indices]
+            if all(v is not None for v in values):
+                assert get_attribute(node, "axis") == 0
+                self.sympy_data_[node.output[0]] = []
+                for value in values:
+                    if isinstance(value, list):
+                        self.sympy_data_[node.output[0]].extend(value)
+                    else:
+                        self.sympy_data_[node.output[0]].append(value)
+
+        sympy_shape = self._get_sympy_shape(node, tensor_input_indices[0])
+        axis = handle_negative_axis(get_attribute(node, "axis"), len(sympy_shape))
+        for i_idx in tensor_input_indices[1:]:
+            input_shape = self._get_sympy_shape(node, i_idx)
+            if input_shape:
+                sympy_shape[axis] = sympy_shape[axis] + input_shape[axis]
+        self._update_computed_dims(sympy_shape)
+        # merge symbolic dims for non-concat axes
+        for d in range(len(sympy_shape)):
+            if d == axis:
+                continue
+            dims = [
+                self._get_shape(node, i_idx)[d]
+                for i_idx in tensor_input_indices
+                if self._get_shape(node, i_idx)
+            ]
+            if all(d == dims[0] for d in dims):
+                continue
+            merged = self._merge_symbols(dims)
+            if type(merged) is str:
+                sympy_shape[d] = self.symbolic_dims_[merged] if merged else None
+            else:
+                sympy_shape[d] = merged
+        vi = self.known_vi_[node.output[0]]
+        vi.CopyFrom(
+            helper.make_tensor_value_info(
+                node.output[0],
+                self.known_vi_[node.input[tensor_input_indices[0]]].type.tensor_type.elem_type,
+                get_shape_from_sympy_shape(sympy_shape),
+            )
+        )
+
     def _infer_ConcatFromSequence(self, node):  # noqa: N802
         seq_shape = self._get_shape(node, 0)
         new_axis = 1 if get_attribute(node, "new_axis") else 0
@@ -1057,6 +1113,49 @@ class SymbolicShapeInference:
 
         vi = self.known_vi_[node.output[0]]
         vi.CopyFrom(helper.make_tensor_value_info(node.output[0], output_dtype, new_shape))
+
+    def _infer_QLinearGlobalAveragePool(self, node):  # noqa: N802
+        sympy_shape = self._get_sympy_shape(node, 0)
+        if not sympy_shape or len(sympy_shape) < 2:
+            return
+
+        channels_last = get_attribute(node, "channels_last", 0)
+        new_sympy_shape = list(sympy_shape)
+
+        if channels_last:
+            start = 1
+            end = len(new_sympy_shape) - 1
+        else:
+            start = 2
+            end = len(new_sympy_shape)
+
+        for i in range(start, end):
+            new_sympy_shape[i] = 1
+
+        self._update_computed_dims(new_sympy_shape)
+        vi = self.known_vi_[node.output[0]]
+        vi.CopyFrom(
+            helper.make_tensor_value_info(
+                node.output[0],
+                self.known_vi_[node.input[0]].type.tensor_type.elem_type,
+                get_shape_from_sympy_shape(new_sympy_shape),
+            )
+        )
+
+    def _infer_QLinearSoftmax(self, node):  # noqa: N802
+        sympy_shape = self._get_sympy_shape(node, 0)
+        if not sympy_shape:
+            return
+
+        self._update_computed_dims(sympy_shape)
+        vi = self.known_vi_[node.output[0]]
+        vi.CopyFrom(
+            helper.make_tensor_value_info(
+                node.output[0],
+                self.known_vi_[node.input[0]].type.tensor_type.elem_type,
+                get_shape_from_sympy_shape(sympy_shape),
+            )
+        )
 
     def _infer_Einsum(self, node):  # noqa: N802
         # ref:https://github.com/onnx/onnx/blob/623dfaa0151b2e4ce49779c3ec31cbd78c592b80/onnx/defs/math/defs.cc#L3275
@@ -2764,9 +2863,11 @@ class SymbolicShapeInference:
 
         for node in sorted_nodes:
             assert all(i in self.known_vi_ for i in node.input if i)
+            logger.debug("infer_single_node")
             self._onnx_infer_single_node(node)
             known_aten_op = False
             if node.op_type in self.dispatcher_:
+                logger.debug("call dispatcher")
                 self.dispatcher_[node.op_type](node)
             elif node.op_type in ["ConvTranspose"]:
                 # onnx shape inference ops like ConvTranspose may have empty shape for symbolic input
@@ -2928,6 +3029,8 @@ class SymbolicShapeInference:
                             self.run_ = False
                     else:
                         self.run_ = False
+                        logger.debug(f"XX  {self.run_}")
+                    logger.debug(f"XX2  {self.run_}")
 
                     # create new dynamic dims for ops not handled by symbolic shape inference
                     if self.run_ is False and node.op_type not in self.dispatcher_ and not known_aten_op:
@@ -2962,7 +3065,7 @@ class SymbolicShapeInference:
                                         f"Possible unknown op: {node.op_type} node: {node.name}, guessing {vi.name} shape"
                                     )
                                 if self.verbose_ > 2:
-                                    logger.debug(f"  {node.output[i_o]}: {new_shape!s} {vi.type.tensor_type.elem_type}")
+                                    logger.debug(f"XX  {node.output[i_o]}: {new_shape!s} {vi.type.tensor_type.elem_type}")
 
                             self.run_ = True
                             continue  # continue the inference after guess, no need to stop as no merge is needed
@@ -2984,7 +3087,8 @@ class SymbolicShapeInference:
                         if self.auto_merge_ and not out_type_undefined:
                             logger.debug("Merging: " + str(self.suggested_merge_))  # noqa: G003
                     return False
-
+                else:
+                    logger.debug("x")
         self.run_ = False
         return True
 

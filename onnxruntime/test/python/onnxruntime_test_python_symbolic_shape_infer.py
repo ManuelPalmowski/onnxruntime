@@ -725,6 +725,220 @@ class TestSymbolicShapeInferenceForOperators(unittest.TestCase):
         ]
         self._check_shapes(graph, inferred.graph, expected_shapes)
 
+    def test_qlinear_concat(self):
+        """
+        Test QLinearConcat op ('com.microsoft' domain).
+        Check that the output shape is propagated from the tensor inputs.
+        """
+        initializers = [
+            helper.make_tensor(
+                "Y_scale",
+                TensorProto.FLOAT,
+                [],
+                [0.5],
+            ),
+            helper.make_tensor(
+                "Y_zero_point",
+                TensorProto.UINT8,
+                [],
+                [0],
+            ),
+            helper.make_tensor(
+                "X1_scale",
+                TensorProto.FLOAT,
+                [],
+                [0.25],
+            ),
+            helper.make_tensor(
+                "X1_zero_point",
+                TensorProto.UINT8,
+                [],
+                [1],
+            ),
+            helper.make_tensor(
+                "X2_scale",
+                TensorProto.FLOAT,
+                [],
+                [0.75],
+            ),
+            helper.make_tensor(
+                "X2_zero_point",
+                TensorProto.UINT8,
+                [],
+                [2],
+            ),
+        ]
+
+        nodes = [
+            helper.make_node(
+                "QLinearConcat",
+                inputs=[
+                    "Y_scale",
+                    "Y_zero_point",
+                    "X1",
+                    "X1_scale",
+                    "X1_zero_point",
+                    "X2",
+                    "X2_scale",
+                    "X2_zero_point",
+                ],
+                outputs=["Y"],
+                axis=1,
+                domain="com.microsoft",
+            ),
+        ]
+
+        inputs = [
+            helper.make_tensor_value_info("X1", TensorProto.UINT8, ["b", "s", 4]),
+            helper.make_tensor_value_info("X2", TensorProto.UINT8, ["b", "t", 4]),
+        ]
+
+        outputs = [
+            helper.make_tensor_value_info("Y", TensorProto.UNDEFINED, None),
+        ]
+
+        graph = helper.make_graph(nodes, "QLinearConcat_Test", inputs, outputs, initializers)
+        model = helper.make_model(graph)
+
+        inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+
+        expected_shapes = [
+            helper.make_tensor_value_info("Y", TensorProto.UINT8, ["b", "s + t", 4]),
+        ]
+        self._check_shapes(graph, inferred.graph, expected_shapes)
+
+    def test_qlinear_global_average_pool(self):
+        """
+        Test QLinearGlobalAveragePool op ('com.microsoft' domain).
+        Check that the output shape preserves N and C and sets spatial dims to 1.
+        """
+        initializers = [
+            helper.make_tensor(
+                "x_scale",
+                TensorProto.FLOAT,
+                [],
+                [0.5],
+            ),
+            helper.make_tensor(
+                "x_zero_point",
+                TensorProto.UINT8,
+                [],
+                [0],
+            ),
+            helper.make_tensor(
+                "y_scale",
+                TensorProto.FLOAT,
+                [],
+                [1.0],
+            ),
+            helper.make_tensor(
+                "y_zero_point",
+                TensorProto.UINT8,
+                [],
+                [0],
+            ),
+        ]
+
+        nodes = [
+            helper.make_node(
+                "QLinearGlobalAveragePool",
+                inputs=[
+                    "X",
+                    "x_scale",
+                    "x_zero_point",
+                    "y_scale",
+                    "y_zero_point",
+                ],
+                outputs=["Y"],
+                channels_last=1,
+                domain="com.microsoft",
+            ),
+        ]
+
+        inputs = [
+            helper.make_tensor_value_info("X", TensorProto.UINT8, ["b", "h", "w", "c"]),
+        ]
+
+        outputs = [
+            helper.make_tensor_value_info("Y", TensorProto.UNDEFINED, None),
+        ]
+
+        graph = helper.make_graph(nodes, "QLinearGlobalAveragePool_Test", inputs, outputs, initializers)
+        model = helper.make_model(graph)
+
+        inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+
+        expected_shapes = [
+            helper.make_tensor_value_info("Y", TensorProto.UINT8, ["b", 1, 1, "c"]),
+        ]
+        self._check_shapes(graph, inferred.graph, expected_shapes)
+
+    def test_qlinear_softmax(self):
+        """
+        Test QLinearSoftmax op ('com.microsoft' domain).
+        Check that the output shape is propagated from the input.
+        """
+        initializers = [
+            helper.make_tensor(
+                "x_scale",
+                TensorProto.FLOAT,
+                [],
+                [0.5],
+            ),
+            helper.make_tensor(
+                "x_zero_point",
+                TensorProto.UINT8,
+                [],
+                [0],
+            ),
+            helper.make_tensor(
+                "y_scale",
+                TensorProto.FLOAT,
+                [],
+                [1.0],
+            ),
+            helper.make_tensor(
+                "y_zero_point",
+                TensorProto.UINT8,
+                [],
+                [0],
+            ),
+        ]
+
+        nodes = [
+            helper.make_node(
+                "QLinearSoftmax",
+                inputs=[
+                    "X",
+                    "x_scale",
+                    "x_zero_point",
+                    "y_scale",
+                    "y_zero_point",
+                ],
+                outputs=["Y"],
+                axis=-1,
+                domain="com.microsoft",
+            ),
+        ]
+
+        inputs = [
+            helper.make_tensor_value_info("X", TensorProto.UINT8, ["b", "s", "c"]),
+        ]
+
+        outputs = [
+            helper.make_tensor_value_info("Y", TensorProto.UNDEFINED, None),
+        ]
+
+        graph = helper.make_graph(nodes, "QLinearSoftmax_Test", inputs, outputs, initializers)
+        model = helper.make_model(graph)
+
+        inferred = SymbolicShapeInference.infer_shapes(model, auto_merge=True)
+
+        expected_shapes = [
+            helper.make_tensor_value_info("Y", TensorProto.UINT8, ["b", "s", "c"]),
+        ]
+        self._check_shapes(graph, inferred.graph, expected_shapes)
+
 
 class TestSymbolicShapeInferenceForSlice(unittest.TestCase):
     def check_slice_of_concat(self, input_dims, start, end, step, expected_output_dim):
