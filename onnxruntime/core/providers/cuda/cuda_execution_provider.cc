@@ -394,6 +394,7 @@ std::optional<bool> CUDAExecutionProvider::ShouldConvertDataLayoutForOp([[maybe_
       "DepthToSpace",
       "SpaceToDepth",
       "LRN",
+      "QLinearConv",
   };
 
   return (node_domain == kOnnxDomain && cuda_nhwc_onnx_ops.find(node_op_type) != cuda_nhwc_onnx_ops.end()) ||
@@ -1020,6 +1021,10 @@ class ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kO
 class ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 11, float, Round);
 class ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 11, double, Round);
 class ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 11, MLFloat16, Round);
+#if !defined(USE_CUDA_MINIMAL) && CUDNN_MAJOR >= 9 && defined(ENABLE_CUDA_NHWC_OPS)
+class ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, int8_t, QLinearConv);
+class ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, uint8_t, QLinearConv);
+#endif
 class ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, int8_t, QuantizeLinear);
 class ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, uint8_t, QuantizeLinear);
 class ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, int8_t, DequantizeLinear);
@@ -2021,6 +2026,10 @@ static Status RegisterCudaKernels(KernelRegistry& kernel_registry) {
       BuildKernelCreateInfo<ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, MLFloat16, ThresholdedRelu)>,
       BuildKernelCreateInfo<ONNX_OPERATOR_VERSIONED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 10, TopK)>,
       BuildKernelCreateInfo<ONNX_OPERATOR_VERSIONED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 1, 10, If)>,
+#if !defined(USE_CUDA_MINIMAL) && CUDNN_MAJOR >= 9 && defined(ENABLE_CUDA_NHWC_OPS)
+      BuildKernelCreateInfo<ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, int8_t, QLinearConv)>,
+      BuildKernelCreateInfo<ONNX_OPERATOR_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, uint8_t, QLinearConv)>,
+#endif
       BuildKernelCreateInfo<ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, int8_t, QuantizeLinear)>,
       BuildKernelCreateInfo<ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, uint8_t, QuantizeLinear)>,
       BuildKernelCreateInfo<ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_CLASS_NAME(kCudaExecutionProvider, kOnnxDomain, 10, 12, int8_t, DequantizeLinear)>,
@@ -3007,6 +3016,114 @@ CUDAExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph,
       // cast is not compute heavy, and may be placed outside
     } else if ("NhwcConv" == node.OpType()) {
       not_supported = NhwcConvNeedFallbackToCPU(node, logger, graph, IsNHWCPreferred());
+      force_inside = !not_supported;
+    } else if ("QLinearConv" == node.OpType()) {
+      not_supported = !IsNHWCPreferred();
+#ifdef ENABLE_CUDA_NHWC_OPS
+      if (!not_supported) {
+        const auto* weight_def = node.InputDefs().size() > 1 ? node.InputDefs()[1] : nullptr;
+        const auto weight_name = weight_def ? weight_def->Name() : std::string();
+        int64_t group = 1;
+        for (const auto& attr : node.GetAttributes()) {
+          if (attr.first == "group") {
+            group = attr.second.i();
+            break;
+          }
+        }
+
+        bool has_input_channels_per_group = false;
+        int64_t input_channels_per_group = 0;
+        if (!weight_name.empty() && graph.IsConstantInitializer(weight_name, true)) {
+          const auto* weight_initializer = graph.GetConstantInitializer(weight_name, true);
+          if (weight_initializer) {
+            const auto& weight_dims = weight_initializer->dims();
+            if (weight_dims.size() > 1) {
+              input_channels_per_group = weight_dims.Get(1);
+              has_input_channels_per_group = true;
+            }
+          }
+        } else if (weight_def && weight_def->Shape() && weight_def->Shape()->dim_size() > 1 &&
+                   weight_def->Shape()->dim(1).has_dim_value()) {
+          input_channels_per_group = weight_def->Shape()->dim(1).dim_value();
+          has_input_channels_per_group = true;
+        }
+
+        if (!has_input_channels_per_group && group > 1) {
+          const auto* input_def = node.InputDefs().empty() ? nullptr : node.InputDefs()[0];
+          const auto* input_shape = input_def ? input_def->Shape() : nullptr;
+          if (input_shape && input_shape->dim_size() > 1) {
+            int channel_index = 1;
+            if (node.Domain() == kMSInternalNHWCDomain) {
+              channel_index = input_shape->dim_size() - 1;
+            }
+            const auto& channel_dim = input_shape->dim(channel_index);
+            if (channel_dim.has_dim_value() && channel_dim.dim_value() == group) {
+              input_channels_per_group = 1;
+              has_input_channels_per_group = true;
+            }
+          }
+        }
+
+        if (has_input_channels_per_group && group > 1 && input_channels_per_group == 1) {
+          LOGS(logger, WARNING) << "Dropping the QLinearConv node: " << node.Name()
+                                << " to CPU because grouped pointwise/depthwise NHWC QLinearConv is not supported.";
+          not_supported = true;
+        }
+
+        if (!not_supported) {
+          const auto* w_zero_point_def = node.InputDefs().size() > 5 ? node.InputDefs()[5] : nullptr;
+          if (w_zero_point_def && w_zero_point_def->Exists()) {
+            const auto* w_zero_point_initializer = graph.GetConstantInitializer(w_zero_point_def->Name(), true);
+            if (!w_zero_point_initializer) {
+              LOGS(logger, WARNING) << "Dropping the QLinearConv node: " << node.Name()
+                                    << " to CPU because w_zero_point must be a constant initializer for NHWC QLinearConv.";
+              not_supported = true;
+            } else {
+              const int32_t w_zero_point_data_type = w_zero_point_initializer->data_type();
+              Initializer w_zero_point_init(graph.GetGraph(), *w_zero_point_initializer, graph.ModelPath());
+
+              if (w_zero_point_data_type == ONNX_NAMESPACE::TensorProto_DataType_UINT8) {
+                bool invalid_zero_point = false;
+                const auto* w_zero_point_data = w_zero_point_init.data<uint8_t>();
+                const size_t w_zero_point_size = w_zero_point_init.size();
+                for (size_t idx = 0; idx < w_zero_point_size; ++idx) {
+                  if (w_zero_point_data[idx] != 128) {
+                    invalid_zero_point = true;
+                    break;
+                  }
+                }
+
+                if (invalid_zero_point) {
+                  LOGS(logger, WARNING) << "Dropping the QLinearConv node: " << node.Name()
+                                        << " to CPU because uint8 weight zero point is not 128 for NHWC QLinearConv.";
+                  not_supported = true;
+                }
+              } else if (w_zero_point_data_type == ONNX_NAMESPACE::TensorProto_DataType_INT8) {
+                bool invalid_zero_point = false;
+                const auto* w_zero_point_data = w_zero_point_init.data<int8_t>();
+                const size_t w_zero_point_size = w_zero_point_init.size();
+                for (size_t idx = 0; idx < w_zero_point_size; ++idx) {
+                  if (w_zero_point_data[idx] != 0) {
+                    invalid_zero_point = true;
+                    break;
+                  }
+                }
+
+                if (invalid_zero_point) {
+                  LOGS(logger, WARNING) << "Dropping the QLinearConv node: " << node.Name()
+                                        << " to CPU because int8 weight zero point is not 0 for NHWC QLinearConv.";
+                  not_supported = true;
+                }
+              } else {
+                LOGS(logger, WARNING) << "Dropping the QLinearConv node: " << node.Name()
+                                      << " to CPU because w_zero_point must be int8 or uint8 for NHWC QLinearConv.";
+                not_supported = true;
+              }
+            }
+          }
+        }
+      }
+#endif
       force_inside = !not_supported;
     }
 

@@ -86,6 +86,8 @@ class CUDA_NHWC_OP_VERSIONED_TYPED_CLASS_NAME(1, 12, MLFloat16, LRN);
 class CUDA_NHWC_OP_TYPED_CLASS_NAME(13, float, LRN);
 class CUDA_NHWC_OP_TYPED_CLASS_NAME(13, double, LRN);
 class CUDA_NHWC_OP_TYPED_CLASS_NAME(13, MLFloat16, LRN);
+class CUDA_NHWC_OP_TYPED_CLASS_NAME(10, int8_t, QLinearConv);
+class CUDA_NHWC_OP_TYPED_CLASS_NAME(10, uint8_t, QLinearConv);
 
 Status RegisterCudaNhwcKernels(KernelRegistry& kernel_registry) {
   static const BuildKernelCreateInfoFn nhwc_function_table[] = {
@@ -149,6 +151,8 @@ Status RegisterCudaNhwcKernels(KernelRegistry& kernel_registry) {
       BuildKernelCreateInfo<CUDA_NHWC_OP_TYPED_CLASS_NAME(13, float, LRN)>,
       BuildKernelCreateInfo<CUDA_NHWC_OP_TYPED_CLASS_NAME(13, double, LRN)>,
       BuildKernelCreateInfo<CUDA_NHWC_OP_TYPED_CLASS_NAME(13, MLFloat16, LRN)>,
+      BuildKernelCreateInfo<CUDA_NHWC_OP_TYPED_CLASS_NAME(10, int8_t, QLinearConv)>,
+      BuildKernelCreateInfo<CUDA_NHWC_OP_TYPED_CLASS_NAME(10, uint8_t, QLinearConv)>,
   };
 
   for (auto& function_table_entry : nhwc_function_table) {

@@ -2397,6 +2397,82 @@ TEST_F(GraphTransformationTests, FuseConvActivation) {
   }
 }
 
+TEST_F(GraphTransformationTests, FuseCudaInternalNhwcQLinearConvRelu) {
+  std::unordered_map<std::string, int> domain_to_version;
+  domain_to_version[kOnnxDomain] = 14;
+  domain_to_version[kMSDomain] = 1;
+  domain_to_version[kMSInternalNHWCDomain] = 10;
+  Model model("FuseCudaInternalNhwcQLinearConvRelu", true, ModelMetaData(), PathString(),
+              IOnnxRuntimeOpSchemaRegistryList(), domain_to_version, {}, *logger_);
+  Graph& graph = model.MainGraph();
+
+  ONNX_NAMESPACE::TypeProto int8_type;
+  int8_type.mutable_tensor_type()->set_elem_type(ONNX_NAMESPACE::TensorProto_DataType_INT8);
+
+  ONNX_NAMESPACE::TypeProto float_type;
+  float_type.mutable_tensor_type()->set_elem_type(ONNX_NAMESPACE::TensorProto_DataType_FLOAT);
+
+  auto& x = graph.GetOrCreateNodeArg("x", &int8_type);
+  auto& x_scale = graph.GetOrCreateNodeArg("x_scale", &float_type);
+  auto& x_zero_point = graph.GetOrCreateNodeArg("x_zero_point", &int8_type);
+  auto& w = graph.GetOrCreateNodeArg("w", &int8_type);
+  auto& w_scale = graph.GetOrCreateNodeArg("w_scale", &float_type);
+  auto& w_zero_point = graph.GetOrCreateNodeArg("w_zero_point", &int8_type);
+  auto& y_scale = graph.GetOrCreateNodeArg("y_scale", &float_type);
+  auto& y_zero_point = graph.GetOrCreateNodeArg("y_zero_point", &int8_type);
+  auto& qconv_out = graph.GetOrCreateNodeArg("qconv_out", &int8_type);
+  auto& output = graph.GetOrCreateNodeArg("output", &int8_type);
+
+  graph.AddNode("qconv", "QLinearConv", "QLinearConv", {&x, &x_scale, &x_zero_point, &w, &w_scale, &w_zero_point, &y_scale, &y_zero_point},
+                {&qconv_out}, nullptr, kMSInternalNHWCDomain);
+  graph.AddNode("relu", "Relu", "Relu", {&qconv_out}, {&output});
+
+  graph.SetInputs({&x, &x_scale, &x_zero_point, &w, &w_scale, &w_zero_point, &y_scale, &y_zero_point});
+  graph.SetOutputs({&output});
+
+  for (auto& node : graph.Nodes()) {
+    node.SetExecutionProviderType(kCudaExecutionProvider);
+  }
+
+  ASSERT_STATUS_OK(graph.Resolve());
+
+  int pre_qlinearconv_count = 0;
+  int pre_relu_count = 0;
+  for (const auto& node : graph.Nodes()) {
+    if (node.OpType() == "QLinearConv" && node.Domain() == kMSInternalNHWCDomain) {
+      ++pre_qlinearconv_count;
+    }
+    if (node.OpType() == "Relu") {
+      ++pre_relu_count;
+    }
+  }
+  ASSERT_EQ(pre_qlinearconv_count, 1);
+  ASSERT_EQ(pre_relu_count, 1);
+
+  onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<ConvActivationFusion>(), TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
+
+  int post_qlinearconv_count = 0;
+  int post_relu_count = 0;
+  bool found_fused_qlinearconv = false;
+  for (const auto& node : graph.Nodes()) {
+    if (node.OpType() == "QLinearConv" && node.Domain() == kMSInternalNHWCDomain) {
+      ++post_qlinearconv_count;
+      found_fused_qlinearconv = true;
+      const auto& attrs = node.GetAttributes();
+      auto attr_it = attrs.find("activation");
+      ASSERT_TRUE(attr_it != attrs.end());
+      ASSERT_EQ(attr_it->second.s(), "Relu");
+    } else if (node.OpType() == "Relu") {
+      ++post_relu_count;
+    }
+  }
+  ASSERT_EQ(post_qlinearconv_count, 1);
+  ASSERT_EQ(post_relu_count, 0);
+  ASSERT_TRUE(found_fused_qlinearconv);
+}
+
 TEST_F(GraphTransformationTests, FuseConvClip11Activation) {
   constexpr const ORTCHAR_T* model_uri = MODEL_FOLDER "fusion/conv_clip11.onnx";
   std::shared_ptr<Model> p_model;

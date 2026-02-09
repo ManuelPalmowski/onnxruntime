@@ -140,7 +140,7 @@ void OpSet_Internal_NHWC_ONNX::ForEachSchema(const std::function<void(ONNX_NAMES
   REGISTER_NHWC_SCHEMA_WITH_ACTIVATION(fn, MaxUnpool, 9);
   REGISTER_NHWC_SCHEMA_WITH_ACTIVATION(fn, MaxUnpool, 11);
 
-  REGISTER_NHWC_SCHEMA(fn, QLinearConv, 10);
+  REGISTER_NHWC_SCHEMA_WITH_ACTIVATION(fn, QLinearConv, 10);
 
   REGISTER_NHWC_SCHEMA(fn, SpaceToDepth, 1);
   REGISTER_NHWC_SCHEMA(fn, SpaceToDepth, 13);

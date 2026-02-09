@@ -293,10 +293,8 @@ CudnnFeTensor::CudnnFeTensor(const onnxruntime::TensorShapeVector& shape,
   std::vector<int64_t> shape_vec;
   if (shape.size() == 1) {
     shape_vec = {1, shape[0], 1, 1};
-  } else if (shape.size() >= 4) {
-    for (size_t i = 0; i < shape.size(); i++) {
-      shape_vec.push_back(shape[i]);
-    }
+  } else if (shape.size() >= 3) {
+    shape_vec.assign(shape.begin(), shape.end());
   } else {
     ORT_THROW("Invalid tensor shape size, tensor name: ", name, ", shape size: ", shape.size());
   }

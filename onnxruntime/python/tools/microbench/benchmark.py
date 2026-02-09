@@ -21,8 +21,10 @@ def numpy_type(torch_type):
     type_map = {
         torch.float32: numpy.float32,
         torch.float16: numpy.float16,
+        torch.int8: numpy.int8,
         torch.int32: numpy.int32,
         torch.int64: numpy.int64,
+        torch.uint8: numpy.uint8,
     }
     return type_map[torch_type]
 
@@ -56,6 +58,12 @@ def add_arguments(parser: ArgumentParser):
         help="If enable profiling",
     )
 
+    parser.add_argument(
+        "--nhwc",
+        action="store_true",
+        default=False,
+        help="If enable prefer_nhwc",
+    )
 
 def provider_name(name):
     provider_map = {
@@ -75,6 +83,7 @@ class Benchmark:
     def __init__(self, model, inputs, outputs, args):
         self.provider = get_default_provider() if args.provider is None else provider_name(args.provider)
         logger.info(f"Execution provider: {self.provider}")
+        self.prefer_nhwc = args.nhwc
         self.profiling = args.profiling
         self.model = model
         logger.info(f"Model: {self.model}")
@@ -113,8 +122,18 @@ class Benchmark:
 
     def create_session(self):
         sess_opt = ort.SessionOptions()
+        if self.provider == "CUDAExecutionProvider" and self.prefer_nhwc:
+            provider_options = {
+                "prefer_nhwc" : int(self.prefer_nhwc)
+            }
+            provider = [(self.provider, provider_options)]
+        else:
+            provider = [self.provider]
+
         sess_opt.enable_profiling = self.profiling
-        sess = ort.InferenceSession(self.model, sess_options=sess_opt, providers=[self.provider])
+        #sess_opt.log_severity_level = 1
+        #sess_opt.log_verbosity_level = 1
+        sess = ort.InferenceSession(self.model, sess_options=sess_opt, providers=provider)
         return sess
 
     def benchmark(self):

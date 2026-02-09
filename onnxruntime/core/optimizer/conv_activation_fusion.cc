@@ -79,6 +79,9 @@ class ConvActivationSelector : public NodeSelector {
       return std::nullopt;
     }
 
+    const bool is_internal_nhwc_qlinearconv =
+        node.Domain() == kMSInternalNHWCDomain && node.OpType() == "QLinearConv";
+
     auto is_supported_non_cuda_ep_activation = [&graph_viewer](const Node& activation_node) {
       if (graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Relu", {6, 13, 14}) ||
           graph_utils::IsSupportedOptypeVersionAndDomain(activation_node, "Sigmoid", {6, 13}) ||
@@ -104,7 +107,10 @@ class ConvActivationSelector : public NodeSelector {
 
     // check EP type and activation
     if (node_ep == kCudaExecutionProvider) {
-      return std::nullopt;
+      if (!is_internal_nhwc_qlinearconv ||
+          !graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "Relu", {6, 13, 14})) {
+        return std::nullopt;
+      }
     } else if (node_ep.empty() || node_ep == kCpuExecutionProvider || node_ep == kJsExecutionProvider || node_ep == kWebGpuExecutionProvider) {
       if (!is_supported_non_cuda_ep_activation(*next_node) &&
           !graph_utils::IsSupportedOptypeVersionAndDomain(*next_node, "HardSigmoid", {6, 22})) {
@@ -146,6 +152,8 @@ class FuseConvActivationAction : public ReplaceWithNew {
     } else if (domain == kMSInternalNHWCDomain) {
       if (op_type == "Conv") {
         return "Conv";
+      } else if (op_type == "QLinearConv") {
+        return "QLinearConv";
       }
     }
     ORT_THROW("Unsupported operator: ", op_type, " and domain: ", domain);
@@ -209,10 +217,15 @@ void RegisterConvActivationFusionRules(SelectorActionRegistry& registry) {
   auto action = std::make_unique<actions::FuseConvActivationAction>();
 #if !defined(ORT_MINIMAL_BUILD)
   const std::string msInternalNHWCDomainConv = SelectorActionRegistry::OpVersionsMapKey("Conv", kMSInternalNHWCDomain);
+  const std::string msInternalNHWCDomainQLinearConv = SelectorActionRegistry::OpVersionsMapKey("QLinearConv", kMSInternalNHWCDomain);
   const std::string msDomainConv = SelectorActionRegistry::OpVersionsMapKey("NhwcConv", kMSDomain);
   auto selector = std::make_unique<selectors::ConvActivationSelector>();
 
-  registry.RegisterSelectorAndAction(name, {{"Conv", {1, 11, 22}}, {msInternalNHWCDomainConv, {1, 11, 22}}, {msDomainConv, {1}}},
+  registry.RegisterSelectorAndAction(name, 
+		                     {{"Conv", {1, 11, 22}}, 
+				     {msInternalNHWCDomainConv, {1, 11, 22}}, 
+                                     {msInternalNHWCDomainQLinearConv, {10}},
+				     {msDomainConv, {1}}},
                                      std::move(selector), std::move(action));
 #else
   registry.RegisterAction(name, std::move(action));

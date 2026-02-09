@@ -761,7 +761,7 @@ void BaseTester::RunWithConfig(size_t* number_of_pre_packed_weights_counter,
         // skip if execution provider is disabled
         if (execution_provider == nullptr)
           continue;
-
+        printf("provider %s\n", provider_type.c_str());
         ExecuteModelForEps(
             [&execution_provider]() {
               std::vector<std::unique_ptr<IExecutionProvider>> ret;

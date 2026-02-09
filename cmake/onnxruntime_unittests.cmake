@@ -503,6 +503,7 @@ if (onnxruntime_USE_CUDA AND NOT onnxruntime_MINIMAL_BUILD AND NOT onnxruntime_R
     "${TEST_SRC_DIR}/providers/cuda/*"
     )
   list(APPEND onnxruntime_test_providers_src ${onnxruntime_test_providers_cuda_src})
+  list(APPEND onnxruntime_test_providers_src "${TEST_SRC_DIR}/providers/cuda/test_cases/qlinearconv_op_test.cc")
 
   if (onnxruntime_USE_CUDA_NHWC_OPS AND CUDNN_MAJOR_VERSION GREATER 8)
     file(GLOB onnxruntime_test_providers_cuda_nhwc_src CONFIGURE_DEPENDS
@@ -947,6 +948,10 @@ if (onnxruntime_ENABLE_CUDA_EP_INTERNAL_TESTS)
   file(GLOB onnxruntime_test_providers_cuda_ut_src CONFIGURE_DEPENDS
     "${TEST_SRC_DIR}/providers/cuda/test_cases/*"
     ${onnxruntime_test_cuda_kernels_src_patterns}
+  )
+
+  list(REMOVE_ITEM onnxruntime_test_providers_cuda_ut_src
+    "${TEST_SRC_DIR}/providers/cuda/test_cases/qlinearconv_op_test.cc"
   )
 
   # onnxruntime_providers_cuda_ut is only for unittests.
