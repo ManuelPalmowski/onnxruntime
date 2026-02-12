@@ -84,6 +84,7 @@ class Benchmark:
         self.provider = get_default_provider() if args.provider is None else provider_name(args.provider)
         logger.info(f"Execution provider: {self.provider}")
         self.prefer_nhwc = args.nhwc
+        self.cuda_algo_search = getattr(args, "cuda_algo_search", None)
         self.profiling = args.profiling
         self.model = model
         logger.info(f"Model: {self.model}")
@@ -126,9 +127,15 @@ class Benchmark:
             provider_options = {
                 "prefer_nhwc" : int(self.prefer_nhwc)
             }
+            if self.cuda_algo_search:
+                provider_options["cudnn_conv_algo_search"] = self.cuda_algo_search
             provider = [(self.provider, provider_options)]
         else:
-            provider = [self.provider]
+            if self.provider == "CUDAExecutionProvider" and self.cuda_algo_search:
+                provider_options = {"cudnn_conv_algo_search": self.cuda_algo_search}
+                provider = [(self.provider, provider_options)]
+            else:
+                provider = [self.provider]
 
         sess_opt.enable_profiling = self.profiling
         #sess_opt.log_severity_level = 1
@@ -175,10 +182,17 @@ class BenchmarkOp(ABC):
     @abstractmethod
     def case_profile(cls, op_param, time): ...
 
+    @classmethod
+    def case_profile_error(cls, op_param, error):
+        return f"( case ) = ( {op_param} ), FAILED: {error}"
+
     def benchmark(self):
         self.create_cases()
         for op_param, model in self.cases:
             inputs, outputs = self.create_inputs_outputs(op_param)
             bm = Benchmark(model, inputs, outputs, self.args)
-            time = bm.benchmark()
-            print(self.case_profile(op_param, time))
+            try:
+                time = bm.benchmark()
+                print(self.case_profile(op_param, time))
+            except RuntimeError as error:
+                print(self.case_profile_error(op_param, error))
